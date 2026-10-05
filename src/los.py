@@ -51,8 +51,13 @@ class DEMGrid:
 
     def sample(self, x, y):
         """Nearest-cell sample for scalar or NumPy-array x/y coordinates."""
-        xs = np.asarray(x, dtype="float64")
-        ys = np.asarray(y, dtype="float64")
+        raw_x = np.asarray(x, dtype="float64")
+        raw_y = np.asarray(y, dtype="float64")
+        scalar = raw_x.ndim == 0 and raw_y.ndim == 0
+        xs = np.atleast_1d(raw_x)
+        ys = np.atleast_1d(raw_y)
+        if xs.shape != ys.shape:
+            raise ValueError("x and y sample coordinates must have matching shapes")
 
         cols = np.floor((xs - self.extent.XMin) / self.cell_width).astype("int64")
         rows_from_bottom = np.floor(
@@ -70,8 +75,8 @@ class DEMGrid:
         if np.any(valid):
             output[valid] = self.array_m[rows[valid], cols[valid]]
 
-        if output.ndim == 0:
-            return float(output)
+        if scalar:
+            return float(output[0])
         return output
 
 
