@@ -53,6 +53,22 @@ def _warning(text: str) -> None:
         print(f"WARNING: {text}")
 
 
+def _checkout_visibility_extension() -> tuple[str, bool]:
+    """Checkout Spatial Analyst or 3D Analyst, whichever is available."""
+    for extension, label in (("Spatial", "Spatial Analyst"), ("3D", "3D Analyst")):
+        status = arcpy.CheckExtension(extension)
+        if status == "Available":
+            arcpy.CheckOutExtension(extension)
+            _message(f"Using {label} license for Geodesic Viewshed.")
+            return extension, True
+        if status in {"CheckedOut", "AlreadyInitialized"}:
+            _message(f"Using existing {label} license for Geodesic Viewshed.")
+            return extension, False
+    raise RuntimeError(
+        "Geodesic Viewshed requires either a Spatial Analyst or 3D Analyst license."
+    )
+
+
 def _create_table(gdb: str, name: str, fields) -> str:
     table = os.path.join(gdb, name)
     if arcpy.Exists(table):
@@ -164,7 +180,7 @@ def run_batch(
         finally:
             raise RuntimeError("Preflight QA/QC failed. Review the QA Report sheet.")
 
-    arcpy.CheckOutExtension("Spatial")
+    extension_name, extension_checked_out_here = _checkout_visibility_extension()
     status = RunStatus(status_path)
     if not resume_previous_run and Path(status_path).exists():
         Path(status_path).unlink()
@@ -194,6 +210,7 @@ def run_batch(
         "save_viewshed_rasters": save_viewshed_rasters,
         "resume_previous_run": resume_previous_run,
         "dem": dem,
+        "viewshed_extension": extension_name,
     }
 
     log = []
@@ -315,7 +332,8 @@ def run_batch(
         write_report(report_path, summary_rows, detail_rows, qa_rows, config)
         Path(log_path).write_text("\n".join(log) + ("\n" if log else ""), encoding="utf-8")
     finally:
-        arcpy.CheckInExtension("Spatial")
+        if extension_checked_out_here:
+            arcpy.CheckInExtension(extension_name)
 
     return {
         "output_gdb": output_gdb,
