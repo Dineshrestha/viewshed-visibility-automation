@@ -69,29 +69,40 @@ def run_preflight(
     tower_id_field: str,
     tower_height_field: str,
     dem: str,
+    visibility_engine: str,
 ) -> tuple[bool, list[dict]]:
     """Validate datasets before a long batch starts."""
     qa: list[dict] = []
     valid = True
 
-    spatial_status = arcpy.CheckExtension("Spatial")
-    three_d_status = arcpy.CheckExtension("3D")
-    extension_ok = (
-        spatial_status in VALID_EXTENSION_STATES
-        or three_d_status in VALID_EXTENSION_STATES
-    )
-    qa.append(
-        {
-            "Level": "ERROR" if not extension_ok else "INFO",
-            "Check": "Viewshed extension license",
-            "Result": "PASS" if extension_ok else "FAIL",
-            "Message": (
-                f"Spatial Analyst={spatial_status}; "
-                f"3D Analyst={three_d_status}; requires either one"
-            ),
-        }
-    )
-    valid &= extension_ok
+    if visibility_engine == "ArcGIS Geodesic Viewshed":
+        spatial_status = arcpy.CheckExtension("Spatial")
+        three_d_status = arcpy.CheckExtension("3D")
+        extension_ok = (
+            spatial_status in VALID_EXTENSION_STATES
+            or three_d_status in VALID_EXTENSION_STATES
+        )
+        qa.append(
+            {
+                "Level": "ERROR" if not extension_ok else "INFO",
+                "Check": "Viewshed extension license",
+                "Result": "PASS" if extension_ok else "FAIL",
+                "Message": (
+                    f"Spatial Analyst={spatial_status}; "
+                    f"3D Analyst={three_d_status}; requires either one"
+                ),
+            }
+        )
+        valid &= extension_ok
+    else:
+        qa.append(
+            {
+                "Level": "INFO",
+                "Check": "Visibility engine license",
+                "Result": "PASS",
+                "Message": "NumPy Direct LOS does not require Spatial Analyst or 3D Analyst",
+            }
+        )
 
     all_site_ids = []
     for dataset, geom_label in site_layers:
