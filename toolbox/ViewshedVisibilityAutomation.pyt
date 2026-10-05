@@ -94,8 +94,9 @@ class BatchViewshedVisibility:
     def __init__(self):
         self.label = "Batch Viewshed & Visibility"
         self.description = (
-            "Generate mixed-geometry observers, run site-level Geodesic Viewshed, "
-            "classify tower visibility using the AGL raster, and create GIS/Excel outputs."
+            "Generate mixed-geometry observers and classify structure visibility. "
+            "Auto uses ArcGIS Geodesic Viewshed when licensed and otherwise falls "
+            "back to extension-free NumPy direct line-of-sight analysis."
         )
         self.canRunInBackground = False
 
@@ -212,13 +213,28 @@ class BatchViewshedVisibility:
         observer_spacing.value = 500
 
         search_distance = arcpy.Parameter(
-            displayName="Target Search / Viewshed Distance",
+            displayName="Target Search / Visibility Distance",
             name="search_distance",
             datatype="GPLinearUnit",
             parameterType="Required",
             direction="Input",
         )
         search_distance.value = "5 Miles"
+
+        visibility_engine = arcpy.Parameter(
+            displayName="Visibility Engine",
+            name="visibility_engine",
+            datatype="GPString",
+            parameterType="Required",
+            direction="Input",
+        )
+        visibility_engine.filter.type = "ValueList"
+        visibility_engine.filter.list = [
+            "Auto",
+            "ArcGIS Geodesic Viewshed",
+            "NumPy Direct LOS",
+        ]
+        visibility_engine.value = "Auto"
 
         save_viewsheds = arcpy.Parameter(
             displayName="Save Per-Site Viewshed Rasters",
@@ -260,6 +276,7 @@ class BatchViewshedVisibility:
             observer_height,
             observer_spacing,
             search_distance,
+            visibility_engine,
             save_viewsheds,
             resume,
             output_folder,
@@ -280,9 +297,10 @@ class BatchViewshedVisibility:
             observer_height=parameters[10].valueAsText,
             observer_spacing_m=float(parameters[11].value),
             search_distance=parameters[12].valueAsText,
-            save_viewshed_rasters=bool(parameters[13].value),
-            resume_previous_run=bool(parameters[14].value),
-            output_folder=parameters[15].valueAsText,
+            visibility_engine=parameters[13].valueAsText,
+            save_viewshed_rasters=bool(parameters[14].value),
+            resume_previous_run=bool(parameters[15].value),
+            output_folder=parameters[16].valueAsText,
         )
         arcpy.AddMessage(f"Results geodatabase: {outputs['output_gdb']}")
         arcpy.AddMessage(f"Excel report: {outputs['excel_report']}")
