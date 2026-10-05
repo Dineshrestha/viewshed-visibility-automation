@@ -16,6 +16,23 @@ def _delete_if_exists(*datasets) -> None:
             arcpy.management.Delete(dataset)
 
 
+def _sample_raster_value(raster: str, geometry, raster_sr) -> float | None:
+    """Return a raster cell value at a point without requiring Spatial Analyst."""
+    point_geom = geometry
+    if geometry.spatialReference and raster_sr:
+        if geometry.spatialReference.name != raster_sr.name:
+            point_geom = geometry.projectAs(raster_sr)
+    point = point_geom.firstPoint
+    result = arcpy.management.GetCellValue(raster, f"{point.X} {point.Y}")
+    raw = str(result.getOutput(0)).strip()
+    if not raw or raw.lower() in {"nodata", "no data", "nan", "#"}:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 def select_candidate_towers(
     towers: str,
     site_geometry,
@@ -67,6 +84,11 @@ def run_site_visibility(
     The Geodesic Viewshed AGL raster stores the minimum height above the DEM
     surface required to make each cell visible from at least one observer.
     A tower is classified Visible when tower_height_m >= required_AGL_m.
+
+    Geodesic Viewshed is invoked through the 3D Analyst toolbox because Esri
+    licenses the tool for either Spatial Analyst or 3D Analyst. Raster values
+    are sampled with Data Management's Get Cell Value tool so the workflow does
+    not add a separate Spatial Analyst-only dependency.
     """
     token = safe_name(site_id, 32)
     candidates, candidate_count = select_candidate_towers(
@@ -80,11 +102,13 @@ def run_site_visibility(
         return [], 0
 
     agl = os.path.join(scratch_gdb, f"agl_{token}")
-    _delete_if_exists(agl)
+    viewshed_temp = os.path.join(scratch_gdb, f"viewshed_{token}")
+    _delete_if_exists(agl, viewshed_temp)
 
-    viewshed = arcpy.sa.Viewshed2(
+    arcpy.ddd.Viewshed2(
         in_raster=dem,
         in_observer_features=observer_fc,
+        out_raster=viewshed_temp,
         out_agl_raster=agl,
         analysis_type="FREQUENCY",
         observer_offset=observer_height,
@@ -100,24 +124,20 @@ def run_site_visibility(
         viewshed_path = str(Path(viewshed_folder) / f"viewshed_{token}.tif")
         if arcpy.Exists(viewshed_path):
             arcpy.management.Delete(viewshed_path)
-        viewshed.save(viewshed_path)
+        arcpy.management.CopyRaster(viewshed_temp, viewshed_path)
 
-    arcpy.sa.ExtractMultiValuesToPoints(
-        candidates,
-        [[agl, "AGL_RAW"]],
-        "NONE",
-    )
-
+    dem_sr = arcpy.Describe(agl).spatialReference
     rows: list[dict] = []
-    fields = [tower_id_field, tower_height_field, "AGL_RAW"]
+    fields = [tower_id_field, tower_height_field, "SHAPE@"]
     with arcpy.da.SearchCursor(candidates, fields) as cursor:
-        for tower_id, tower_height, required_agl in cursor:
+        for tower_id, tower_height, geometry in cursor:
             tower_height_m = height_to_meters(float(tower_height), tower_height_units)
-            if required_agl is None or float(required_agl) <= -9990:
+            required_agl = _sample_raster_value(agl, geometry, dem_sr)
+            if required_agl is None or required_agl <= -9990:
                 required_agl_m = None
                 visibility = "NoData"
             else:
-                required_agl_m = height_to_meters(float(required_agl), dem_vertical_units)
+                required_agl_m = height_to_meters(required_agl, dem_vertical_units)
                 visibility = "Visible" if tower_height_m >= required_agl_m else "Obscured"
 
             rows.append(
@@ -132,5 +152,5 @@ def run_site_visibility(
                 }
             )
 
-    _delete_if_exists(candidates, agl)
+    _delete_if_exists(candidates, agl, viewshed_temp)
     return rows, candidate_count
