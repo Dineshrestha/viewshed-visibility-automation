@@ -7,6 +7,9 @@ from collections import Counter
 import arcpy
 
 
+VALID_EXTENSION_STATES = {"Available", "CheckedOut", "AlreadyInitialized"}
+
+
 def _field_names(dataset: str) -> set[str]:
     return {field.name for field in arcpy.ListFields(dataset)}
 
@@ -71,14 +74,21 @@ def run_preflight(
     qa: list[dict] = []
     valid = True
 
-    extension_status = arcpy.CheckExtension("Spatial")
-    extension_ok = extension_status in {"Available", "CheckedOut", "AlreadyInitialized"}
+    spatial_status = arcpy.CheckExtension("Spatial")
+    three_d_status = arcpy.CheckExtension("3D")
+    extension_ok = (
+        spatial_status in VALID_EXTENSION_STATES
+        or three_d_status in VALID_EXTENSION_STATES
+    )
     qa.append(
         {
             "Level": "ERROR" if not extension_ok else "INFO",
-            "Check": "Spatial Analyst license",
+            "Check": "Viewshed extension license",
             "Result": "PASS" if extension_ok else "FAIL",
-            "Message": extension_status,
+            "Message": (
+                f"Spatial Analyst={spatial_status}; "
+                f"3D Analyst={three_d_status}; requires either one"
+            ),
         }
     )
     valid &= extension_ok
