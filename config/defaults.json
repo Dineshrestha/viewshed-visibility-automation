@@ -1,0 +1,14 @@
+{
+  "dem_service_url": "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer",
+  "dem_resolution_m": 30,
+  "dem_buffer": "5 Miles",
+  "dem_tile_pixels": 7000,
+  "observer_height": "6 Feet",
+  "observer_spacing_m": 500,
+  "search_distance": "5 Miles",
+  "tower_height_units": "Feet",
+  "save_viewshed_rasters": false,
+  "resume_previous_run": true,
+  "demo_random_seed": 42,
+  "dem_vertical_units": "Meters"
+}
