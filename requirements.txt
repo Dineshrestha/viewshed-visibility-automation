@@ -1,3 +1,4 @@
 # ArcPy is provided by ArcGIS Pro and is intentionally not listed here.
+numpy>=1.24
 openpyxl>=3.1
 pytest>=8.0
