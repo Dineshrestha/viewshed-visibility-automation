@@ -37,6 +37,9 @@ def prepare_dem(
     Large service requests are divided into Web Mercator tiles so the workflow
     does not depend on a single image export exceeding server image dimensions.
     The final DEM is projected to the study area's projected coordinate system.
+
+    DEM preparation intentionally uses Data Management tools only for the final
+    raster clip, so a Spatial Analyst extension is not required for this step.
     """
     if float(cell_size_m) <= 0:
         raise ValueError("cell_size_m must be positive")
@@ -138,7 +141,14 @@ def prepare_dem(
         arcpy.management.Delete(output_dem)
 
     _log("Clipping DEM to buffered study area...")
-    clipped = arcpy.sa.ExtractByMask(projected, buffer_fc)
-    clipped.save(output_dem)
+    arcpy.management.Clip(
+        projected,
+        "#",
+        output_dem,
+        buffer_fc,
+        "#",
+        "ClippingGeometry",
+        "NO_MAINTAIN_EXTENT",
+    )
     _log(f"DEM ready: {output_dem}")
     return output_dem
