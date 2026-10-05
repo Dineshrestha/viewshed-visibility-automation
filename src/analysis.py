@@ -7,13 +7,42 @@ from pathlib import Path
 
 import arcpy
 
-from .utils import height_to_meters, safe_name
+from .los import DEMGrid, evaluate_candidate_towers
+from .utils import height_to_meters, linear_unit_to_meters, safe_name
+
+AUTO_ENGINE = "Auto"
+ARCGIS_ENGINE = "ArcGIS Geodesic Viewshed"
+NUMPY_ENGINE = "NumPy Direct LOS"
+VALID_EXTENSION_STATES = {"Available", "CheckedOut", "AlreadyInitialized"}
 
 
 def _delete_if_exists(*datasets) -> None:
     for dataset in datasets:
         if dataset and arcpy.Exists(dataset):
             arcpy.management.Delete(dataset)
+
+
+def _extension_available(name: str) -> bool:
+    return arcpy.CheckExtension(name) in VALID_EXTENSION_STATES
+
+
+def resolve_visibility_engine(requested: str = AUTO_ENGINE) -> str:
+    """Resolve Auto to ArcGIS Viewshed when licensed, otherwise NumPy LOS."""
+    requested = (requested or AUTO_ENGINE).strip()
+    if requested == AUTO_ENGINE:
+        if _extension_available("Spatial") or _extension_available("3D"):
+            return ARCGIS_ENGINE
+        return NUMPY_ENGINE
+    if requested == ARCGIS_ENGINE:
+        if not (_extension_available("Spatial") or _extension_available("3D")):
+            raise RuntimeError(
+                "ArcGIS Geodesic Viewshed requires Spatial Analyst or 3D Analyst. "
+                "Choose 'NumPy Direct LOS' or 'Auto' when neither extension is licensed."
+            )
+        return ARCGIS_ENGINE
+    if requested == NUMPY_ENGINE:
+        return NUMPY_ENGINE
+    raise ValueError(f"Unsupported visibility engine: {requested}")
 
 
 def _sample_raster_value(raster: str, geometry, raster_sr) -> float | None:
@@ -63,6 +92,34 @@ def select_candidate_towers(
     return candidates, count
 
 
+def _run_arcgis_viewshed(
+    dem: str,
+    observer_fc: str,
+    agl: str,
+    viewshed_temp: str,
+    observer_height: str,
+    search_distance: str,
+) -> None:
+    """Run Geodesic Viewshed through whichever licensed extension is present."""
+    kwargs = dict(
+        in_raster=dem,
+        in_observer_features=observer_fc,
+        out_raster=viewshed_temp,
+        out_agl_raster=agl,
+        analysis_type="FREQUENCY",
+        observer_offset=observer_height,
+        outer_radius=search_distance,
+        outer_radius_is_3d="GROUND",
+        analysis_method="ALL_SIGHTLINES",
+    )
+    if _extension_available("Spatial"):
+        arcpy.sa.Viewshed2(**kwargs)
+    elif _extension_available("3D"):
+        arcpy.ddd.Viewshed2(**kwargs)
+    else:
+        raise RuntimeError("Spatial Analyst or 3D Analyst is required for ArcGIS Viewshed.")
+
+
 def run_site_visibility(
     site_id: str,
     site_geometry,
@@ -78,18 +135,17 @@ def run_site_visibility(
     scratch_gdb: str,
     save_viewshed: bool = False,
     viewshed_folder: str | None = None,
+    visibility_engine: str = AUTO_ENGINE,
+    dem_grid: DEMGrid | None = None,
 ) -> tuple[list[dict], int]:
-    """Run Geodesic Viewshed and classify candidate tower visibility.
+    """Classify candidate tower visibility for a single site.
 
-    The Geodesic Viewshed AGL raster stores the minimum height above the DEM
-    surface required to make each cell visible from at least one observer.
-    A tower is classified Visible when tower_height_m >= required_AGL_m.
-
-    Geodesic Viewshed is invoked through the 3D Analyst toolbox because Esri
-    licenses the tool for either Spatial Analyst or 3D Analyst. Raster values
-    are sampled with Data Management's Get Cell Value tool so the workflow does
-    not add a separate Spatial Analyst-only dependency.
+    ArcGIS Geodesic Viewshed is used when requested and licensed. Otherwise the
+    NumPy Direct LOS engine samples the DEM along observer-to-target sightlines
+    and calculates the minimum target height required to clear intervening
+    terrain. A target is visible when at least one site observer can see it.
     """
+    engine = resolve_visibility_engine(visibility_engine)
     token = safe_name(site_id, 32)
     candidates, candidate_count = select_candidate_towers(
         towers,
@@ -101,20 +157,41 @@ def run_site_visibility(
     if candidate_count == 0:
         return [], 0
 
+    if engine == NUMPY_ENGINE:
+        if dem_grid is None:
+            dem_grid = DEMGrid(dem, dem_vertical_units)
+        value, units = observer_height.strip().split(maxsplit=1)
+        observer_height_m = linear_unit_to_meters(float(value), units)
+        rows = evaluate_candidate_towers(
+            observer_fc=observer_fc,
+            candidate_towers=candidates,
+            tower_id_field=tower_id_field,
+            tower_height_field=tower_height_field,
+            tower_height_units=tower_height_units,
+            dem_grid=dem_grid,
+            observer_height_m=observer_height_m,
+        )
+        for row in rows:
+            row["Site_ID"] = str(site_id)
+        if save_viewshed:
+            arcpy.AddWarning(
+                "Per-site viewshed rasters require the ArcGIS Geodesic Viewshed engine. "
+                "NumPy Direct LOS still produces tower visibility, QA, GIS tables, and Excel output."
+            )
+        _delete_if_exists(candidates)
+        return rows, candidate_count
+
     agl = os.path.join(scratch_gdb, f"agl_{token}")
     viewshed_temp = os.path.join(scratch_gdb, f"viewshed_{token}")
     _delete_if_exists(agl, viewshed_temp)
 
-    arcpy.ddd.Viewshed2(
-        in_raster=dem,
-        in_observer_features=observer_fc,
-        out_raster=viewshed_temp,
-        out_agl_raster=agl,
-        analysis_type="FREQUENCY",
-        observer_offset=observer_height,
-        outer_radius=search_distance,
-        outer_radius_is_3d="GROUND",
-        analysis_method="ALL_SIGHTLINES",
+    _run_arcgis_viewshed(
+        dem=dem,
+        observer_fc=observer_fc,
+        agl=agl,
+        viewshed_temp=viewshed_temp,
+        observer_height=observer_height,
+        search_distance=search_distance,
     )
 
     if save_viewshed:
