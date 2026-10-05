@@ -8,7 +8,13 @@ from pathlib import Path
 
 import arcpy
 
-from .analysis import run_site_visibility
+from .analysis import (
+    ARCGIS_ENGINE,
+    NUMPY_ENGINE,
+    resolve_visibility_engine,
+    run_site_visibility,
+)
+from .los import DEMGrid
 from .observers import create_observer_feature_class
 from .reporting import write_report
 from .status import RunStatus
@@ -59,22 +65,24 @@ def _checkout_visibility_extension() -> tuple[str, bool]:
         status = arcpy.CheckExtension(extension)
         if status == "Available":
             arcpy.CheckOutExtension(extension)
-            _message(f"Using {label} license for Geodesic Viewshed.")
+            _message(f"Using {label} license for ArcGIS Geodesic Viewshed.")
             return extension, True
         if status in {"CheckedOut", "AlreadyInitialized"}:
-            _message(f"Using existing {label} license for Geodesic Viewshed.")
+            _message(f"Using existing {label} license for ArcGIS Geodesic Viewshed.")
             return extension, False
     raise RuntimeError(
-        "Geodesic Viewshed requires either a Spatial Analyst or 3D Analyst license."
+        "ArcGIS Geodesic Viewshed requires either Spatial Analyst or 3D Analyst."
     )
 
 
 def _create_table(gdb: str, name: str, fields) -> str:
     table = os.path.join(gdb, name)
-    if arcpy.Exists(table):
-        return table
-    arcpy.management.CreateTable(gdb, name)
+    if not arcpy.Exists(table):
+        arcpy.management.CreateTable(gdb, name)
+    existing = {field.name for field in arcpy.ListFields(table)}
     for field_name, field_type, length in fields:
+        if field_name in existing:
+            continue
         kwargs = {"field_length": length} if length else {}
         arcpy.management.AddField(table, field_name, field_type, **kwargs)
     return table
@@ -142,6 +150,7 @@ def run_batch(
     observer_height: str = "6 Feet",
     observer_spacing_m: float = 500.0,
     search_distance: str = "5 Miles",
+    visibility_engine: str = "Auto",
     save_viewshed_rasters: bool = False,
     resume_previous_run: bool = True,
 ) -> dict:
@@ -166,6 +175,14 @@ def run_batch(
     if not site_layers:
         raise ValueError("At least one point, line, or polygon site layer is required.")
 
+    resolved_engine = resolve_visibility_engine(visibility_engine)
+    _message(f"Visibility engine: {resolved_engine}")
+    if resolved_engine == NUMPY_ENGINE and save_viewshed_rasters:
+        _warning(
+            "Save Per-Site Viewshed Rasters is unavailable with NumPy Direct LOS; "
+            "tower visibility and reporting will still run."
+        )
+
     valid, qa_rows = run_preflight(
         site_layers,
         site_id_field,
@@ -173,6 +190,7 @@ def run_batch(
         tower_id_field,
         tower_height_field,
         dem,
+        resolved_engine,
     )
     if not valid:
         try:
@@ -180,7 +198,20 @@ def run_batch(
         finally:
             raise RuntimeError("Preflight QA/QC failed. Review the QA Report sheet.")
 
-    extension_name, extension_checked_out_here = _checkout_visibility_extension()
+    extension_name = None
+    extension_checked_out_here = False
+    if resolved_engine == ARCGIS_ENGINE:
+        extension_name, extension_checked_out_here = _checkout_visibility_extension()
+
+    dem_grid = None
+    if resolved_engine == NUMPY_ENGINE:
+        _message("Loading DEM into memory for extension-free direct line-of-sight analysis...")
+        dem_grid = DEMGrid(dem, dem_vertical_units)
+        _message(
+            f"DEM loaded: {dem_grid.ncols} columns x {dem_grid.nrows} rows; "
+            f"~{dem_grid.cell_size_m:g} m cells."
+        )
+
     status = RunStatus(status_path)
     if not resume_previous_run and Path(status_path).exists():
         Path(status_path).unlink()
@@ -207,7 +238,10 @@ def run_batch(
         "search_distance": search_distance,
         "tower_height_units": tower_height_units,
         "dem_vertical_units": dem_vertical_units,
-        "save_viewshed_rasters": save_viewshed_rasters,
+        "visibility_engine": resolved_engine,
+        "save_viewshed_rasters": bool(
+            save_viewshed_rasters and resolved_engine == ARCGIS_ENGINE
+        ),
         "resume_previous_run": resume_previous_run,
         "dem": dem,
         "viewshed_extension": extension_name,
@@ -254,8 +288,12 @@ def run_batch(
                             observer_height=observer_height,
                             search_distance=search_distance,
                             scratch_gdb=scratch_gdb,
-                            save_viewshed=save_viewshed_rasters,
+                            save_viewshed=(
+                                save_viewshed_rasters and resolved_engine == ARCGIS_ENGINE
+                            ),
                             viewshed_folder=viewshed_folder,
+                            visibility_engine=resolved_engine,
+                            dem_grid=dem_grid,
                         )
 
                         for detail in detail_rows:
@@ -332,7 +370,7 @@ def run_batch(
         write_report(report_path, summary_rows, detail_rows, qa_rows, config)
         Path(log_path).write_text("\n".join(log) + ("\n" if log else ""), encoding="utf-8")
     finally:
-        if extension_checked_out_here:
+        if extension_checked_out_here and extension_name:
             arcpy.CheckInExtension(extension_name)
 
     return {
@@ -340,5 +378,9 @@ def run_batch(
         "excel_report": report_path,
         "status_json": status_path,
         "run_log": log_path,
-        "viewshed_folder": viewshed_folder if save_viewshed_rasters else None,
+        "viewshed_folder": (
+            viewshed_folder
+            if save_viewshed_rasters and resolved_engine == ARCGIS_ENGINE
+            else None
+        ),
     }
